@@ -1,5 +1,6 @@
 import {
   ComponentResourceOptions,
+  interpolate,
   jsonParse,
   output,
   Output,
@@ -9,96 +10,12 @@ import { Link } from "../link";
 import { Input } from "../input.js";
 import { rds, secretsmanager } from "@pulumi/aws";
 import { permission } from "./permission";
-
-type ACU = `${number} ACU`;
-
-function parseACU(acu: ACU) {
-  const result = parseFloat(acu.split(" ")[0]);
-  return result;
-}
+import { RandomPassword } from "@pulumi/random";
+import { Vpc } from "./vpc";
+import { Vpc as VpcV1 } from "./vpc-v1";
+import { VisibleError } from "../error";
 
 export interface PostgresArgs {
-  /**
-   * The Postgres engine version. Check out the [available versions in your region](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Concepts.Aurora_Fea_Regions_DB-eng.Feature.ServerlessV2.html#Concepts.Aurora_Fea_Regions_DB-eng.Feature.ServerlessV2.apg).
-   * @default `"15.5"`
-   * @example
-   * ```js
-   * {
-   *   version: "13.9"
-   * }
-   * ```
-   */
-  version?: Input<string>;
-  /**
-   * Name of a database that is automatically created inside the cluster.
-   *
-   * The name must begin with a letter and contain only lowercase letters, numbers, or underscores. By default, it takes the name of the app, and replaces the hyphens with underscores.
-   *
-   * @default Based on the name of the current app
-   * @example
-   * ```js
-   * {
-   *   databaseName: "acme"
-   * }
-   * ```
-   */
-  databaseName?: Input<string>;
-  /**
-   * The Aurora Serverless v2 scaling config. By default, the cluster has one DB instance that
-   * is used for both writes and reads. The instance can scale from the minimum number of ACUs
-   * to the maximum number of ACUs.
-   *
-   * :::caution
-   * Aurora Serverless v2 does not scale down to 0. The minimum cost of a Postgres cluster
-   * per month is roughly `0.5 * $0.12 per ACU hour * 24 hrs * 30 days = $43.20`.
-   * :::
-   *
-   * An ACU or Aurora Capacity Unit is a combination of CPU and RAM. The cost of an Aurora Serverless v2 cluster is based on the ACU hours
-   * used. Additionally, you are billed for I/O and storage used by the cluster.
-   * [Read more here](https://aws.amazon.com/rds/aurora/pricing/).
-   *
-   * Each ACU is roughly equivalent to 2 GB of memory. So pick the minimum and maximum
-   * based on the baseline and peak memory usage of your app.
-   *
-   * @default `{min: "0.5 ACU", max: "4 ACU"}`
-   */
-  scaling?: Input<{
-    /**
-     * The minimum number of ACUs, ranges from 0.5 to 128, in increments of 0.5.
-     *
-     * For your production workloads, setting a minimum of 0.5 ACUs might not be a great idea due
-     * to the following reasons, you can also [read more here](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2.setting-capacity.html#aurora-serverless-v2.setting-capacity.incompatible_parameters).
-     * - It takes longer to scale from a low number of ACUs to a much higher number.
-     * - Query performance depends on the buffer cache. So if frequently accessed data cannot
-     *   fit into the buffer cache, you might see uneven performance.
-     * - The max connections for a 0.5 ACU Postgres instance is capped at 2000.
-     *
-     * @default `0.5 ACU`
-     * @example
-     * ```js
-     * {
-     *   scaling: {
-     *     min: "2 ACU"
-     *   }
-     * }
-     * ```
-     */
-    min?: Input<ACU>;
-    /**
-     * The maximum number of ACUs, ranges from 1 to 128, in increments of 0.5.
-     *
-     * @default `4 ACU`
-     * @example
-     * ```js
-     * {
-     *   scaling: {
-     *     max: "128 ACU"
-     *   }
-     * }
-     * ```
-     */
-    max?: Input<ACU>;
-  }>;
   /**
    * The VPC to use for the database cluster.
    *
@@ -113,7 +30,6 @@ export interface PostgresArgs {
    * {
    *   vpc: {
    *     privateSubnets: ["subnet-0db7376a7ad4db5fd ", "subnet-06fc7ee8319b2c0ce"],
-   *     securityGroups: ["sg-0399348378a4c256c"],
    *   }
    * }
    * ```
@@ -133,18 +49,27 @@ export interface PostgresArgs {
    * ```
    */
   vpc:
-    | "default"
+    | Vpc
     | Input<{
         /**
          * A list of private subnet IDs in the VPC. The database will be placed in the private
          * subnets.
          */
-        privateSubnets: Input<Input<string>[]>;
-        /**
-         * A list of VPC security group IDs.
-         */
-        securityGroups: Input<Input<string>[]>;
+        subnets: Input<Input<string>[]>;
       }>;
+  //replicas?: Input<number>;
+  /**
+   * The type of instance to use for the database. Check out the [supported instance types](https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/CacheNodes.SupportedTypes.html).
+   *
+   * @default `"t4g.micro"`
+   * @example
+   * ```js
+   * {
+   *   instance: "m7g.xlarge"
+   * }
+   * ```
+   */
+  instance?: Input<string>;
   /**
    * [Transform](/docs/components#transform) how this component creates its underlying
    * resources.
@@ -155,20 +80,14 @@ export interface PostgresArgs {
      */
     subnetGroup?: Transform<rds.SubnetGroupArgs>;
     /**
-     * Transform the RDS Cluster.
+     * Transform the RDS parameter group.
      */
-    cluster?: Transform<rds.ClusterArgs>;
+    parameterGroup?: Transform<rds.ParameterGroupArgs>;
     /**
      * Transform the database instance in the RDS Cluster.
      */
-    instance?: Transform<rds.ClusterInstanceArgs>;
+    instance?: Transform<rds.InstanceArgs>;
   };
-}
-
-interface PostgresRef {
-  ref: boolean;
-  cluster: rds.Cluster;
-  instance: rds.ClusterInstance;
 }
 
 /**
@@ -231,8 +150,7 @@ interface PostgresRef {
  * ```
  */
 export class Postgres extends Component implements Link.Linkable {
-  private cluster: rds.Cluster;
-  private instance: rds.ClusterInstance;
+  private instance: rds.Instance;
 
   constructor(
     name: string,
@@ -241,156 +159,142 @@ export class Postgres extends Component implements Link.Linkable {
   ) {
     super(__pulumiType, name, args, opts);
 
-    if (args && "ref" in args) {
-      const ref = args as unknown as PostgresRef;
-      this.cluster = ref.cluster;
-      this.instance = ref.instance;
-      return;
-    }
-
     const parent = this;
-    const scaling = normalizeScaling();
-    const version = normalizeVersion();
-    const databaseName = normalizeDatabaseName();
 
+    const instanceType = output(args.instance).apply((v) => v ?? "t4g.micro");
+    const vpc = normalizeVpc();
     const subnetGroup = createSubnetGroup();
-    const cluster = createCluster();
+    const parameterGroup = createParameterGroup();
+    const password = createPassword();
     const instance = createInstance();
+    //const replicas = createReplicas();
 
-    this.cluster = cluster;
     this.instance = instance;
 
-    function normalizeScaling() {
-      return output(args.scaling).apply((scaling) => ({
-        minCapacity: parseACU(scaling?.min ?? "0.5 ACU"),
-        maxCapacity: parseACU(scaling?.max ?? "4 ACU"),
-      }));
-    }
+    function normalizeVpc() {
+      // "vpc" is a Vpc.v1 component
+      if (args.vpc instanceof VpcV1) {
+        throw new VisibleError(
+          `You are using the "Vpc.v1" component. Please migrate to the latest "Vpc" component.`,
+        );
+      }
 
-    function normalizeVersion() {
-      return output(args.version).apply((version) => version ?? "15.5");
-    }
+      // "vpc" is a Vpc component
+      if (args.vpc instanceof Vpc) {
+        return {
+          subnets: args.vpc.privateSubnets,
+        };
+      }
 
-    function normalizeDatabaseName() {
-      return output(args.databaseName).apply(
-        (name) => name ?? $app.name.replaceAll("-", "_"),
-      );
+      // "vpc" is object
+      return output(args.vpc);
     }
 
     function createSubnetGroup() {
-      if (args.vpc === "default") return;
       return new rds.SubnetGroup(
         ...transform(
           args.transform?.subnetGroup,
           `${name}SubnetGroup`,
           {
-            subnetIds: output(args.vpc).privateSubnets,
+            subnetIds: vpc.subnets,
           },
           { parent },
         ),
       );
     }
 
-    function createCluster() {
-      return new rds.Cluster(
+    function createParameterGroup() {
+      return new rds.ParameterGroup(
         ...transform(
-          args.transform?.cluster,
-          `${name}Cluster`,
+          args.transform?.parameterGroup,
+          `${name}ParameterGroup`,
           {
-            engine: rds.EngineType.AuroraPostgresql,
-            engineMode: "provisioned",
-            engineVersion: version,
-            databaseName,
-            masterUsername: "postgres",
-            manageMasterUserPassword: true,
-            serverlessv2ScalingConfiguration: scaling,
-            skipFinalSnapshot: true,
-            enableHttpEndpoint: true,
-            dbSubnetGroupName: subnetGroup?.name,
-            vpcSecurityGroupIds:
-              args.vpc === "default"
-                ? undefined
-                : output(args.vpc).securityGroups,
+            family: "postgres16",
+            parameters: [
+              {
+                name: "rds.force_ssl",
+                value: "0",
+              },
+            ],
           },
           { parent },
         ),
       );
+    }
+
+    function createPassword() {
+      return new RandomPassword(`${name}Password`, {
+        length: 32,
+        special: true,
+        overrideSpecial: "!&#$^<>-",
+      });
     }
 
     function createInstance() {
-      return new rds.ClusterInstance(
+      return new rds.Instance(
         ...transform(
           args.transform?.instance,
           `${name}Instance`,
           {
-            clusterIdentifier: cluster.id,
-            instanceClass: "db.serverless",
-            engine: rds.EngineType.AuroraPostgresql,
-            engineVersion: cluster.engineVersion,
-            dbSubnetGroupName: subnetGroup?.name,
+            dbName: $app.name.replaceAll("-", "_"),
+            dbSubnetGroupName: subnetGroup.name,
+            engine: "postgres",
+            engineVersion: "16.3",
+            instanceClass: interpolate`db.${instanceType}`,
+            username: "postgres",
+            password: password.result,
+            parameterGroupName: parameterGroup.name,
+            skipFinalSnapshot: true,
+            storageEncrypted: true,
+            storageType: "gp3",
+            allocatedStorage: 20,
+            maxAllocatedStorage: 100,
+            backupRetentionPeriod: 7,
           },
-          { parent },
+          { parent, deleteBeforeReplace: true },
         ),
       );
     }
-  }
 
-  private _dbSecret?: Output<secretsmanager.GetSecretVersionResult> | undefined;
-  private get secret() {
-    return this.secretArn.apply((val) => {
-      if (this._dbSecret) return this._dbSecret;
-      if (!val) return;
-      this._dbSecret = secretsmanager.getSecretVersionOutput({
-        secretId: val,
-      });
-      return this._dbSecret;
-    });
-  }
-
-  /**
-   * The ID of the RDS Cluster.
-   */
-  public get clusterID() {
-    return this.cluster.id;
-  }
-
-  /**
-   * The ARN of the RDS Cluster.
-   */
-  public get clusterArn() {
-    return this.cluster.arn;
-  }
-
-  /**
-   * The ARN of the master user secret.
-   */
-  public get secretArn() {
-    return this.cluster.masterUserSecrets[0].secretArn;
+    //    function createReplicas() {
+    //      return output(args.replicas).apply((replicas) => {
+    //        if (!replicas) return [];
+    //
+    //        for (let i = 0; i < replicas; i++) {
+    //          new rds.Instance(`${name}Replica${i}`, {
+    //            replicateSourceDb: instance.identifier,
+    //            dbSubnetGroupName: instance.dbSubnetGroupName,
+    //            engine: instance.engine,
+    //            engineVersion: instance.engineVersion,
+    //            instanceClass: instance.instanceClass,
+    //            parameterGroupName: instance.parameterGroupName,
+    //            skipFinalSnapshot: true,
+    //            storageEncrypted: instance.storageEncrypted.apply((v) => v!),
+    //            storageType: instance.storageType,
+    //            allocatedStorage: instance.allocatedStorage,
+    //            maxAllocatedStorage: instance.maxAllocatedStorage.apply((v) => v!),
+    //            backupRetentionPeriod: instance.backupRetentionPeriod,
+    //          });
+    //        }
+    //      });
+    //    }
   }
 
   /** The username of the master user. */
   public get username() {
-    return this.cluster.masterUsername;
+    return this.instance.username;
   }
 
   /** The password of the master user. */
   public get password() {
-    return this.cluster.masterPassword.apply((val) => {
-      if (val) return output(val);
-      const parsed = jsonParse(
-        this.secret.apply((secret) =>
-          secret ? secret.secretString : output("{}"),
-        ),
-      ) as Output<{ username: string; password: string }>;
-      return parsed.password;
-    });
+    return this.instance.password;
   }
 
   /**
    * The name of the database.
    */
   public get database() {
-    return this.cluster.databaseName;
+    return this.instance.dbName;
   }
 
   /**
@@ -404,48 +308,26 @@ export class Postgres extends Component implements Link.Linkable {
    * The host of the database.
    */
   public get host() {
-    return this.instance.endpoint;
+    return this.instance.endpoint.apply((endpoint) => endpoint.split(":")[0]);
   }
 
   public get nodes() {
     return {
-      cluster: this.cluster,
       instance: this.instance,
     };
   }
 
   /** @internal */
   public getSSTLink() {
+    //return { properties: { foo: "bar" } };
     return {
       properties: {
-        clusterArn: this.clusterArn,
-        secretArn: this.secretArn,
-        database: this.cluster.databaseName,
+        database: this.database,
         username: this.username,
         password: this.password,
         port: this.port,
         host: this.host,
       },
-      include: [
-        permission({
-          actions: ["secretsmanager:GetSecretValue"],
-          resources: [
-            this.cluster.masterUserSecrets[0].secretArn.apply(
-              (v) => v ?? "arn:aws:iam::rdsdoesnotusesecretmanager",
-            ),
-          ],
-        }),
-        permission({
-          actions: [
-            "rds-data:BatchExecuteStatement",
-            "rds-data:BeginTransaction",
-            "rds-data:CommitTransaction",
-            "rds-data:ExecuteStatement",
-            "rds-data:RollbackTransaction",
-          ],
-          resources: [this.cluster.arn],
-        }),
-      ],
     };
   }
 

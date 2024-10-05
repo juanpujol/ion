@@ -184,7 +184,10 @@ export class Component extends ComponentResource {
               cb: () => physicalName(63, args.name).toLowerCase(),
             },
             {
-              types: ["aws:rds/clusterInstance:ClusterInstance"],
+              types: [
+                "aws:rds/clusterInstance:ClusterInstance",
+                "aws:rds/instance:Instance",
+              ],
               field: "identifier",
               cb: () => physicalName(63, args.name).toLowerCase(),
             },
@@ -252,6 +255,7 @@ export class Component extends ComponentResource {
             {
               types: [
                 "aws:elasticache/subnetGroup:SubnetGroup",
+                "aws:rds/parameterGroup:ParameterGroup",
                 "aws:rds/subnetGroup:SubnetGroup",
               ],
               field: "name",
