@@ -225,8 +225,7 @@ export class Postgres extends Component implements Link.Linkable {
     function createPassword() {
       return new RandomPassword(`${name}Password`, {
         length: 32,
-        special: true,
-        overrideSpecial: "!&#$^<>-",
+        special: false,
       });
     }
 
